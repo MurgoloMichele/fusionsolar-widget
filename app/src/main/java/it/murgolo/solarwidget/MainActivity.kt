@@ -1,13 +1,16 @@
 package it.murgolo.solarwidget
 
 import android.app.Activity
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.view.View
 import android.os.Bundle
 import android.text.InputType
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -17,6 +20,9 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
 
     private lateinit var status: TextView
+    private lateinit var captchaBox: LinearLayout
+    private lateinit var captchaImg: ImageView
+    private lateinit var captchaCode: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +73,24 @@ class MainActivity : Activity() {
             }
         })
 
+        // Shown only when the portal asks for a captcha.
+        captchaBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        captchaBox.addView(label("Il portale FusionSolar chiede un captcha. Scrivi il codice dell'immagine (toccala per cambiarla):", 13f))
+        captchaImg = ImageView(this).apply {
+            adjustViewBounds = true
+            setBackgroundColor(Color.WHITE)
+            setOnClickListener { loadCaptcha() }
+        }
+        captchaBox.addView(captchaImg, LinearLayout.LayoutParams((240 * resources.displayMetrics.density).toInt(), WRAP_CONTENT))
+        captchaCode = EditText(this).apply {
+            hint = "Codice captcha"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
+        }
+        captchaBox.addView(captchaCode, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        captchaBox.addView(Button(this).apply { text = "Conferma captcha"; setOnClickListener { solveCaptcha() } })
+        col.addView(captchaBox)
+
         status = label("", 13f).apply { setTextIsSelectable(true) }
         col.addView(status)
         col.addView(label("Aggiungi il widget dalla schermata Home: tieni premuto → Widget → Solar Widget.", 13f))
@@ -74,6 +98,38 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(col) })
         FetchWorker.schedulePeriodic(this)
         showLast()
+        if (FusionApi(this).needsCaptcha) loadCaptcha()
+    }
+
+    private fun loadCaptcha() {
+        captchaBox.visibility = View.VISIBLE
+        captchaCode.setText("")
+        thread {
+            val img = try { FusionApi(this).captchaImage() } catch (e: Exception) { null }
+            runOnUiThread {
+                if (img != null) captchaImg.setImageBitmap(BitmapFactory.decodeByteArray(img, 0, img.size))
+                else status.text = "Impossibile caricare il captcha, tocca l'immagine per riprovare"
+            }
+        }
+    }
+
+    private fun solveCaptcha() {
+        val code = captchaCode.text.toString()
+        if (code.isBlank()) { status.text = "Scrivi il codice del captcha"; return }
+        status.text = "Accesso in corso…"
+        thread {
+            val msg = try {
+                SolarData.save(this, FusionApi(this).solveCaptcha(code))
+                null
+            } catch (e: Exception) {
+                e.message ?: e.javaClass.simpleName
+            }
+            SolarWidgetProvider.updateAll(this)
+            runOnUiThread {
+                if (msg == null) { captchaBox.visibility = View.GONE; showLast() }
+                else { status.text = "Errore: $msg"; loadCaptcha() }
+            }
+        }
     }
 
     private fun test() {
@@ -88,7 +144,10 @@ class MainActivity : Activity() {
                 "Errore: ${e.message ?: e.javaClass.simpleName}"
             }
             SolarWidgetProvider.updateAll(this)
-            runOnUiThread { if (msg != null) status.text = msg else showLast() }
+            runOnUiThread {
+                if (msg != null) status.text = msg else showLast()
+                if (FusionApi(this).needsCaptcha) loadCaptcha()
+            }
         }
     }
 

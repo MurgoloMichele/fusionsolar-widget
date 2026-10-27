@@ -61,9 +61,38 @@ class FusionApi(private val ctx: Context) {
         }
     }
 
+    /** True once the portal asked for a captcha: background refreshes stop logging in until it is solved. */
+    val needsCaptcha get() = prefs.getBoolean("needsCaptcha", false)
+
+    /** Captcha image for [solveCaptcha]; it is bound to the current cookies, so they are kept. */
+    fun captchaImage(): ByteArray {
+        val req = Request.Builder().url("https://$loginHost/unisso/verifycode?timestamp=${now()}").build()
+        client.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) throw FusionException("Captcha non disponibile (HTTP ${r.code})")
+            return r.body!!.bytes()
+        }
+    }
+
+    fun solveCaptcha(code: String): SolarData {
+        log.setLength(0)
+        try {
+            login(code.trim())
+            prefs.edit().putBoolean("needsCaptcha", false).apply()
+            return doFetch()
+        } finally {
+            prefs.edit().putString("log", log.toString()).apply()
+        }
+    }
+
     private fun doFetch(): SolarData {
         if (!keepAlive()) {
+            if (needsCaptcha) throw FusionException("Apri Solar Widget e inserisci il captcha")
+            // Logging in too often makes the portal require a captcha: at most once every 10 minutes.
+            val last = prefs.getLong("lastLogin", 0)
+            if (System.currentTimeMillis() - last < 10 * 60_000) throw FusionException("Sessione scaduta, riprovo tra poco")
             login()
+        }
+        if (csrf == null) {
             val candidates = linkedSetOf(dataHost, "region01eu5.fusionsolar.huawei.com", "uni001eu5.fusionsolar.huawei.com", loginHost)
             val ok = candidates.firstOrNull { h -> dataHost = h; keepAlive() }
             if (ok == null) throw FusionException("Sessione non valida dopo il login (vedi log)")
@@ -96,22 +125,24 @@ class FusionApi(private val ctx: Context) {
 
     fun resetSession() {
         jar.clear()
-        prefs.edit().remove("stationDn").remove("dataHost").apply()
+        prefs.edit().remove("stationDn").remove("dataHost").remove("lastLogin").apply()
     }
 
     // ---------- login ----------
 
-    private fun login() {
+    private fun login(captcha: String? = null) {
         val user = Credentials.user(ctx) ?: throw FusionException("Inserisci le credenziali nell'app")
         val pass = Credentials.password(ctx) ?: throw FusionException("Inserisci le credenziali nell'app")
-        jar.clear()
+        if (captcha == null) jar.clear()
         csrf = null
+        prefs.edit().putLong("lastLogin", System.currentTimeMillis()).apply()
 
         val pk = JSONObject(get("https://$loginHost/unisso/pubkey"))
         val resp: JSONObject
         if (pk.optBoolean("enableEncrypt")) {
             val pwd = encryptPassword(pass, pk.getString("pubKey")) + pk.getString("version")
             val body = JSONObject().put("organizationName", "").put("username", user).put("password", pwd)
+            captcha?.let { body.put("verifycode", it) }
             resp = JSONObject(post("https://$loginHost/unisso/v3/validateUser.action?timeStamp=${now()}&nonce=${nonce()}", body))
         } else {
             val body = JSONObject().put("organizationName", "").put("username", user).put("password", pass)
@@ -120,7 +151,10 @@ class FusionApi(private val ctx: Context) {
         }
 
         log("login: " + resp.toString().replace(Regex("ticket=[^\"&]+"), "ticket=…"))
-        if (resp.optBoolean("verifyCodeCreate")) throw FusionException("Il portale richiede un captcha: accedi una volta dal browser e riprova")
+        if (resp.optBoolean("verifyCodeCreate") && resp.optString("redirectURL").let { it.isBlank() || it == "null" } && resp.optJSONArray("respMultiRegionName") == null) {
+            prefs.edit().putBoolean("needsCaptcha", true).apply()
+            throw FusionException(if (captcha == null) "Il portale richiede un captcha: inseriscilo nell'app" else "Captcha errato, riprova")
+        }
         val tfa = resp.opt("twoFactorStatus")
         if (tfa != null && tfa != JSONObject.NULL && tfa.toString().isNotBlank()) log("twoFactorStatus=$tfa")
         val err = resp.optString("errorMsg").takeIf { it.isNotBlank() && it != "null" }
