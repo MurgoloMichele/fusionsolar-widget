@@ -4,7 +4,11 @@ import android.app.Activity
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.view.View
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -69,7 +73,8 @@ class MainActivity : Activity() {
             text = "Mostra dati grezzi (debug)"
             setOnClickListener {
                 val p = getSharedPreferences("fusion", MODE_PRIVATE)
-                status.text = "LOG:\n" + p.getString("log", "-") + "\nENERGY-FLOW:\n" + p.getString("rawFlow", "Nessun dato")
+                status.text = "EVENTI:\n" + Events.all(this@MainActivity) + "\n\nLOG:\n" + p.getString("log", "-") +
+                    "\nENERGY-FLOW:\n" + p.getString("rawFlow", "Nessun dato")
             }
         })
 
@@ -96,7 +101,19 @@ class MainActivity : Activity() {
         col.addView(label("Aggiungi il widget dalla schermata Home: tieni premuto → Widget → Solar Widget.", 13f))
 
         setContentView(ScrollView(this).apply { addView(col) })
+        // Without this exemption Samsung/Android may stop the keep-alive and the session expires.
+        val pm = getSystemService(PowerManager::class.java)
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            col.addView(Button(this).apply {
+                text = "Consenti attività in background (consigliato)"
+                setOnClickListener {
+                    startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                }
+            }, 2)
+        }
+
         FetchWorker.schedulePeriodic(this)
+        KeepAliveReceiver.schedule(this)
         showLast()
         if (FusionApi(this).needsCaptcha) loadCaptcha()
     }

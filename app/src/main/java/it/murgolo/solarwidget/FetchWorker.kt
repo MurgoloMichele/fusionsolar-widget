@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 class FetchWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
 
     override fun doWork(): Result {
+        KeepAliveReceiver.schedule(applicationContext)
         try {
             SolarData.save(applicationContext, FusionApi(applicationContext).fetch())
         } catch (e: Exception) {

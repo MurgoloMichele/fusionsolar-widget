@@ -77,6 +77,7 @@ class FusionApi(private val ctx: Context) {
         log.setLength(0)
         try {
             login(code.trim())
+            Events.add(ctx, "captcha ok, login ok")
             prefs.edit().putBoolean("needsCaptcha", false).apply()
             return doFetch()
         } finally {
@@ -85,12 +86,19 @@ class FusionApi(private val ctx: Context) {
     }
 
     private fun doFetch(): SolarData {
-        if (!keepAlive()) {
+        val state = session()
+        if (state == Session.OFFLINE) {
+            Events.add(ctx, "aggiornamento: rete non disponibile")
+            throw FusionException("Rete non disponibile")
+        }
+        if (state == Session.EXPIRED) {
+            Events.add(ctx, "sessione scaduta")
             if (needsCaptcha) throw FusionException("Apri Solar Widget e inserisci il captcha")
             // Logging in too often makes the portal require a captcha: at most once every 10 minutes.
             val last = prefs.getLong("lastLogin", 0)
             if (System.currentTimeMillis() - last < 10 * 60_000) throw FusionException("Sessione scaduta, riprovo tra poco")
             login()
+            Events.add(ctx, "login ok")
         }
         if (csrf == null) {
             val candidates = linkedSetOf(dataHost, "region01eu5.fusionsolar.huawei.com", "uni001eu5.fusionsolar.huawei.com", loginHost)
@@ -153,6 +161,7 @@ class FusionApi(private val ctx: Context) {
         log("login: " + resp.toString().replace(Regex("ticket=[^\"&]+"), "ticket=…"))
         if (resp.optBoolean("verifyCodeCreate") && resp.optString("redirectURL").let { it.isBlank() || it == "null" } && resp.optJSONArray("respMultiRegionName") == null) {
             prefs.edit().putBoolean("needsCaptcha", true).apply()
+            Events.add(ctx, if (captcha == null) "captcha richiesto" else "captcha errato")
             throw FusionException(if (captcha == null) "Il portale richiede un captcha: inseriscilo nell'app" else "Captcha errato, riprova")
         }
         val tfa = resp.opt("twoFactorStatus")
@@ -196,19 +205,40 @@ class FusionApi(private val ctx: Context) {
         return out.toString()
     }
 
-    // Newer "uni" hosts use dpcloud, older "region" hosts use neteco.
-    private fun keepAlive(): Boolean =
-        listOf("/rest/dpcloud/auth/v1/keep-alive", "/rest/neteco/auth/v1/keep-alive").any { path ->
+    enum class Session { OK, EXPIRED, OFFLINE }
+
+    private fun keepAlive(): Boolean = session() == Session.OK
+
+    /**
+     * Checks the session. Only a real answer from the portal counts as EXPIRED: a network error
+     * (phone dozing, no signal) must never trigger a new login, since repeated logins make the
+     * portal require a captcha.
+     */
+    private fun session(): Session {
+        var offline = false
+        // Newer "uni" hosts use dpcloud, older "region" hosts use neteco.
+        for (path in listOf("/rest/dpcloud/auth/v1/keep-alive", "/rest/neteco/auth/v1/keep-alive")) {
             try {
                 val s = get("https://$dataHost$path")
                 log("keep-alive $dataHost$path: ${s.take(150).replace("\n", " ")}")
                 val token = JSONObject(s).optString("payload")
-                if (token.isNotBlank() && token != "null") { csrf = token; true } else false
+                if (token.isNotBlank() && token != "null") { csrf = token; return Session.OK }
+            } catch (e: java.io.IOException) {
+                log("keep-alive $dataHost$path: offline (${e.javaClass.simpleName})")
+                offline = true
             } catch (e: Exception) {
                 log("keep-alive $dataHost$path: ${e.message}")
-                false
             }
         }
+        return if (offline) Session.OFFLINE else Session.EXPIRED
+    }
+
+    /** Keeps the portal session alive without ever logging in. */
+    fun ping(): Session {
+        val r = session()
+        Events.add(ctx, "ping: ${r.name.lowercase()}")
+        return r
+    }
 
     // ---------- data ----------
 

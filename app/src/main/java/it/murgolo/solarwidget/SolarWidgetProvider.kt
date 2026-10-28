@@ -23,6 +23,7 @@ class SolarWidgetProvider : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         render(context, manager, ids)
+        KeepAliveReceiver.schedule(context)
         FetchWorker.schedulePeriodic(context)
         FetchWorker.refreshNow(context)
     }

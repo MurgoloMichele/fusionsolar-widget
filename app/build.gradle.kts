@@ -11,13 +11,15 @@ android {
         applicationId = "it.murgolo.solarwidget"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.4"
+        versionCode = 10
+        versionName = "1.5"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Lets "adb run-as" read the app's logs when debugging session problems.
+            isDebuggable = true
             signingConfig = signingConfigs.getByName("debug")
         }
     }
